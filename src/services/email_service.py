@@ -18,7 +18,7 @@ class IMAPMailboxError(Exception):
     pass
 
 
-def list_latest_emails(host, username, password, mailbox="INBOX", limit=5):
+def list_latest_emails(host, username, password, mailbox="INBOX", limit=5, status_filter="ALL"):
     """
     Connects to an IMAP server and retrieves the latest emails.
 
@@ -28,10 +28,14 @@ def list_latest_emails(host, username, password, mailbox="INBOX", limit=5):
         password: App password (plaintext decrypted)
         mailbox: Mailbox name
         limit: Number of emails to fetch
+        status_filter: Filter type ('ALL', 'UNSEEN', 'SEEN')
 
     Returns:
         List[dict]: Details of retrieved emails.
     """
+    if status_filter not in ("ALL", "UNSEEN", "SEEN"):
+        status_filter = "ALL"
+
     try:
         mail = imaplib.IMAP4_SSL(host)
     except Exception as e:
@@ -54,7 +58,7 @@ def list_latest_emails(host, username, password, mailbox="INBOX", limit=5):
                 raise IMAPMailboxError(f"Error selecting mailbox '{mailbox}': {e}")
             raise e
 
-        status, messages = mail.search(None, "ALL")
+        status, messages = mail.search(None, status_filter)
         if status != "OK":
             raise IMAPMailboxError("Failed to list messages in the selected mailbox.")
 
@@ -70,9 +74,12 @@ def list_latest_emails(host, username, password, mailbox="INBOX", limit=5):
 
         for msg_id in email_ids:
             try:
-                status, msg_data = mail.fetch(msg_id, "(RFC822)")
+                status, msg_data = mail.fetch(msg_id, "(FLAGS RFC822)")
                 if status != "OK" or not msg_data or not msg_data[0]:
                     continue
+
+                flags_metadata = msg_data[0][0]
+                is_read = b'\\Seen' in flags_metadata
 
                 msg = email.message_from_bytes(msg_data[0][1])
 
@@ -93,6 +100,7 @@ def list_latest_emails(host, username, password, mailbox="INBOX", limit=5):
                         "from": msg.get("From"),
                         "to": msg.get("To"),
                         "date": msg.get("Date"),
+                        "status": "Read" if is_read else "Unread",
                     }
                 )
             except Exception:
