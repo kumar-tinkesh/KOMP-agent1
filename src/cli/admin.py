@@ -1,6 +1,10 @@
 import getpass
+# pyrefly: ignore [missing-import]
 from src.services import client_service
-from src.security import print_table, BLUE, GREEN, YELLOW, RED, BOLD, END, CYAN, MAGENTA
+# pyrefly: ignore [missing-import]
+from src.Security.security import BLUE, GREEN, YELLOW, RED, BOLD, END, CYAN, MAGENTA
+# pyrefly: ignore [missing-import]
+from src.Security.securityUtils import print_table
 
 
 def admin_dashboard(conn, session):

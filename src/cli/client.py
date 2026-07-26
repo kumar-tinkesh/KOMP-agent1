@@ -1,8 +1,12 @@
 # pyrefly: ignore [missing-import]
 import os
-from src.models import get_client_by_user_id
 # pyrefly: ignore [missing-import]
-from src.security import decrypt_password, Spinner, BLUE, GREEN, YELLOW, RED, BOLD, END, CYAN, MAGENTA
+# pyrefly: ignore [missing-import]
+from src.Models.modelUtils import get_client_by_user_id
+# pyrefly: ignore [missing-import]
+from src.Security.security import decrypt_password, BLUE, GREEN, YELLOW, RED, BOLD, END, CYAN, MAGENTA
+# pyrefly: ignore [missing-import]
+from src.Security.securityUtils import Spinner
 # pyrefly: ignore [missing-import]
 from src.services import email_service
 
@@ -230,7 +234,7 @@ def list_emails_flow(client):
         text_content = item.get("text_content", "")
         if action_choice in ("2", "3"):
             if text_content and not text_content.startswith("[Error:") and not text_content.startswith("[Content extraction not supported"):
-                limit = 3000
+                limit = 750
                 preview = text_content[:limit]
                 print(f"{BOLD}Content   :{END}\n{CYAN}{preview}{END}")
                 if len(text_content) > limit:

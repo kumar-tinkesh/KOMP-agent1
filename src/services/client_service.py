@@ -1,5 +1,13 @@
-from src import models
-from src.security import hash_password, encrypt_password
+# pyrefly: ignore [missing-import]
+from src.Models import models
+# pyrefly: ignore [missing-import]
+from src.Models import modelUtils
+# Merge client queries into models namespace
+for _name in dir(modelUtils):
+    if not _name.startswith('_'):
+        setattr(models, _name, getattr(modelUtils, _name))
+# pyrefly: ignore [missing-import]
+from src.Security.security import hash_password, encrypt_password
 
 
 def add_client(conn, username, password, name, email, imap_host, app_password, imap_port=993, mailbox="INBOX"):

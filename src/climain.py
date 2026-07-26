@@ -8,13 +8,15 @@ if parent_dir not in sys.path:
 
 import getpass
 # pyrefly: ignore [missing-import]
-from src import database, models, auth
+from src.Models import database, models
+# pyrefly: ignore [missing-import]
+from src.Security import auth
 # pyrefly: ignore [missing-import]
 from src.cli.admin import admin_dashboard
 # pyrefly: ignore [missing-import]
 from src.cli.client import client_dashboard
 # pyrefly: ignore [missing-import]
-from src.security import BOLD, GREEN, YELLOW, RED, END, CYAN
+from src.Security.security import BOLD, GREEN, YELLOW, RED, END, CYAN
 
 
 def login_flow(conn):

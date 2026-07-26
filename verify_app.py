@@ -4,7 +4,11 @@ import sys
 # Ensure the local workspace packages can be imported
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from src import database, models, security
+# pyrefly: ignore [missing-import]
+from src.Models import database, models
+# pyrefly: ignore [missing-import]
+# pyrefly: ignore [missing-import]
+from src.Security import security
 from src.services import client_service
 
 

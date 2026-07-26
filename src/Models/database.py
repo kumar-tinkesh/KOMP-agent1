@@ -1,8 +1,11 @@
+# pyrefly: ignore [name-defined]
 import sqlite3
+# pyrefly: ignore [name-defined]
 import os
 
 # DB path located at the root of the project workspace
-DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "mail.db"))
+DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "mail.db"))
+
 
 
 def get_db_connection():
@@ -54,7 +57,8 @@ def init_db():
     # Seed default admin user if not exists
     cursor.execute("SELECT 1 FROM users WHERE role = 'admin' LIMIT 1;")
     if not cursor.fetchone():
-        from src.security import hash_password
+        # pyrefly: ignore [missing-import]
+        from src.Security.security import hash_password
         admin_hash = hash_password("admin")
         cursor.execute(
             "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?);",
