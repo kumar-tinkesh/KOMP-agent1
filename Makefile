@@ -38,7 +38,7 @@ run:
 		echo "Virtual environment not found. Running setup first..."; \
 		$(MAKE) setup; \
 	fi
-	$(PYTHON) src/main.py
+	$(PYTHON) src/climain.py
 
 test:
 	@if [ ! -f "$(PYTHON)" ]; then \

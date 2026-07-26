@@ -7,9 +7,13 @@ if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
 import getpass
+# pyrefly: ignore [missing-import]
 from src import database, models, auth
+# pyrefly: ignore [missing-import]
 from src.cli.admin import admin_dashboard
+# pyrefly: ignore [missing-import]
 from src.cli.client import client_dashboard
+# pyrefly: ignore [missing-import]
 from src.security import BOLD, GREEN, YELLOW, RED, END, CYAN
 
 

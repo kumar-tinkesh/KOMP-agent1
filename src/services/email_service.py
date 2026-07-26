@@ -1,5 +1,6 @@
 import imaplib
 import email
+import re
 from email.header import decode_header
 
 
@@ -93,6 +94,66 @@ def list_latest_emails(host, username, password, mailbox="INBOX", limit=5, statu
                         errors="ignore"
                     )
 
+                attachments = []
+                html_body = ""
+                text_body = ""
+                for part in msg.walk():
+                    content_type = part.get_content_type()
+                    if content_type == "text/plain":
+                        try:
+                            payload = part.get_payload(decode=True)
+                            if payload:
+                                text_body += payload.decode('utf-8', errors='ignore')
+                        except Exception:
+                            pass
+                    elif content_type == "text/html":
+                        try:
+                            payload = part.get_payload(decode=True)
+                            if payload:
+                                html_body += payload.decode('utf-8', errors='ignore')
+                        except Exception:
+                            pass
+
+                    filename = part.get_filename()
+                    if filename:
+                        decoded_filename_parts = decode_header(filename)
+                        decoded_filename = ""
+                        for decoded_text, encoding in decoded_filename_parts:
+                            if isinstance(decoded_text, bytes):
+                                try:
+                                    decoded_filename += decoded_text.decode(encoding or "utf-8", errors="ignore")
+                                except Exception:
+                                    decoded_filename += decoded_text.decode("utf-8", errors="ignore")
+                            else:
+                                decoded_filename += decoded_text
+                        if decoded_filename not in attachments:
+                            attachments.append(decoded_filename)
+                    elif part.get_content_disposition() == 'attachment':
+                        attachments.append("unnamed_attachment")
+
+                # Parse Google Drive attachments in HTML body
+                if html_body:
+                    drive_pattern = r'href="https://drive\.google\.com/file/d/[^"]+"[^>]*aria-label="([^"]+)"'
+                    drive_matches = re.findall(drive_pattern, html_body)
+                    if not drive_matches:
+                        span_pattern = r'class="[^"]*gmail_drive_chip[^"]*".*?<span dir="ltr"[^>]*>([^<]+)</span>'
+                        drive_matches = re.findall(span_pattern, html_body, re.DOTALL)
+                    for match in drive_matches:
+                        name = match.strip()
+                        if name and name not in attachments:
+                            attachments.append(name)
+
+                # Parse Google Drive attachments in Plain Text body
+                if text_body:
+                    lines = [line.strip() for line in text_body.splitlines() if line.strip()]
+                    for idx, line in enumerate(lines):
+                        if "drive.google.com/file/d/" in line:
+                            filename = "Google Drive File"
+                            if idx > 0 and lines[idx - 1] and not ("drive.google.com" in lines[idx - 1] or "http" in lines[idx - 1]):
+                                filename = lines[idx - 1].strip("<>()[]\"' ")
+                            if filename and filename not in attachments:
+                                attachments.append(filename)
+
                 email_list.append(
                     {
                         "id": msg_id.decode("utf-8", errors="ignore"),
@@ -101,6 +162,9 @@ def list_latest_emails(host, username, password, mailbox="INBOX", limit=5, statu
                         "to": msg.get("To"),
                         "date": msg.get("Date"),
                         "status": "Read" if is_read else "Unread",
+                        "has_attachment": len(attachments) > 0,
+                        "attachment_count": len(attachments),
+                        "attachment_names": attachments,
                     }
                 )
             except Exception:

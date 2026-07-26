@@ -116,6 +116,11 @@ def list_emails_flow(client):
         print(f"{BOLD}To          :{END} {mail['to']}")
         print(f"{BOLD}Subject     :{END} {CYAN}{mail['subject']}{END}")
         print(f"{BOLD}Date        :{END} {mail['date']}")
+        print(f"{BOLD}Has Attachment:{END} {mail.get('has_attachment', False)}")
+        print(f"{BOLD}Attachment Count:{END} {mail.get('attachment_count', 0)}")
+        if mail.get('has_attachment', False):
+            names_str = ", ".join(mail.get('attachment_names', []))
+            print(f"{BOLD}Attachment Names:{END} {YELLOW}{names_str}{END}")
         
     print(f"{BLUE}{'=' * 60}{END}")
 
