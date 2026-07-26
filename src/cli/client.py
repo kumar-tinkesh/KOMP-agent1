@@ -1,9 +1,11 @@
 # pyrefly: ignore [missing-import]
+import os
 from src.models import get_client_by_user_id
 # pyrefly: ignore [missing-import]
 from src.security import decrypt_password, Spinner, BLUE, GREEN, YELLOW, RED, BOLD, END, CYAN, MAGENTA
 # pyrefly: ignore [missing-import]
 from src.services import email_service
+
 
 
 def client_dashboard(conn, session):
@@ -123,6 +125,119 @@ def list_emails_flow(client):
             print(f"{BOLD}Attachment Names:{END} {YELLOW}{names_str}{END}")
         
     print(f"{BLUE}{'=' * 60}{END}")
+
+    has_any_attachments = any(mail.get("has_attachment", False) for mail in emails)
+    if not has_any_attachments:
+        return
+
+    download_choice = input("\nWould you like to download and extract attachments from one of these emails? (y/N): ").strip().lower()
+    if download_choice != "y":
+        return
+
+    idx_input = input(f"Enter the email number (1-{len(emails)}): ").strip()
+    if not idx_input:
+        return
+    try:
+        email_idx = int(idx_input) - 1
+        if email_idx < 0 or email_idx >= len(emails):
+            print(f"{RED}Error: Email number must be between 1 and {len(emails)}.{END}")
+            return
+    except ValueError:
+        print(f"{RED}Error: Invalid number.{END}")
+        return
+
+    selected_email = emails[email_idx]
+    if not selected_email.get("has_attachment", False):
+        print(f"{RED}Error: Selected email does not have any attachments.{END}")
+        return
+
+    print(f"\n{BOLD}Selected Email:{END} {CYAN}{selected_email['subject']}{END}")
+    print("Choose action for attachments:")
+    print("  1. Save attachments to disk")
+    print("  2. View/Read extracted text content in terminal")
+    print("  3. Both (Save and View)")
+    action_choice = input("Enter choice (1-3) [Default: 3]: ").strip()
+    if not action_choice:
+        action_choice = "3"
+    
+    if action_choice not in ("1", "2", "3"):
+        print(f"{RED}Invalid choice. Defaulting to '3' (Both).{END}")
+        action_choice = "3"
+
+    dest_dir = None
+    temp_dir_obj = None
+
+    if action_choice in ("1", "3"):
+        default_dir = os.path.join(os.getcwd(), "downloads")
+        dest_dir = input(f"Enter download directory [Default: {default_dir}]: ").strip()
+        if not dest_dir:
+            dest_dir = default_dir
+    else:
+        import tempfile
+        temp_dir_obj = tempfile.TemporaryDirectory()
+        dest_dir = temp_dir_obj.name
+
+    # Decrypt app password
+    try:
+        decrypted_password = decrypt_password(client["app_password"])
+    except Exception as e:
+        print(f"{RED}Error: Failed to decrypt app password. Contact Super Admin to reset credentials. ({e}){END}")
+        if temp_dir_obj:
+            temp_dir_obj.cleanup()
+        return
+
+    downloaded_files = []
+    error_msg = None
+
+    with Spinner("Processing attachments..."):
+        try:
+            downloaded_files = email_service.download_email_attachments(
+                host=client["imap_host"],
+                username=client["email"],
+                password=decrypted_password,
+                msg_id=selected_email["id"],
+                download_dir=dest_dir,
+                mailbox=client["mailbox"]
+            )
+        except Exception as e:
+            error_msg = str(e)
+
+    if temp_dir_obj:
+        # Resolve permanent path to not saved indicator
+        for item in downloaded_files:
+            item["saved_path"] = "[Not saved - View Only mode]"
+        temp_dir_obj.cleanup()
+
+    if error_msg:
+        print(f"\n{RED}❌ Processing Error: {error_msg}{END}")
+        return
+
+    if not downloaded_files:
+        print(f"\n{YELLOW}No attachments were successfully processed.{END}")
+        return
+
+    if action_choice in ("1", "3"):
+        print(f"\n{GREEN}✔ Successfully processed {len(downloaded_files)} attachment(s):{END}\n")
+    else:
+        print(f"\n{GREEN}✔ Extracted {len(downloaded_files)} attachment(s) in View Only mode:{END}\n")
+
+    for item in downloaded_files:
+        print(f"{BLUE}{'-' * 60}{END}")
+        print(f"{BOLD}File Name : {END}{GREEN}{item['filename']}{END}")
+        if action_choice in ("1", "3"):
+            print(f"{BOLD}Saved To  : {END}{item['saved_path']}")
+        
+        text_content = item.get("text_content", "")
+        if action_choice in ("2", "3"):
+            if text_content and not text_content.startswith("[Error:") and not text_content.startswith("[Content extraction not supported"):
+                limit = 3000
+                preview = text_content[:limit]
+                print(f"{BOLD}Content   :{END}\n{CYAN}{preview}{END}")
+                if len(text_content) > limit:
+                    print(f"\n{YELLOW}... [Truncated, total characters: {len(text_content)}]{END}")
+            else:
+                print(f"{BOLD}Content   : {END}{YELLOW}{text_content}{END}")
+    print(f"{BLUE}{'-' * 60}{END}\n")
 
 
 def view_settings_flow(client):

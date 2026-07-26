@@ -124,7 +124,7 @@ def run_tests():
         print("  ✔ Passed: Dynamic updates verified.")
 
         # Test 8: Cascade Deletion
-        print("[8/8] Test: Client deletion (cascade delete on user)...")
+        print("[8/9] Test: Client deletion (cascade delete on user)...")
         client_service.delete_client_profile(conn, client_id)
         deleted_client = client_service.get_client_details_by_id(conn, client_id)
         assert deleted_client is None, "Client should be deleted"
@@ -133,9 +133,55 @@ def run_tests():
         assert user is None, "User should be cascade deleted"
         print("  ✔ Passed: Account deletion and DB cascades verified.")
 
+        # Test 9: Content extraction validation
+        print("[9/9] Test: Content extraction from various attachments...")
+        import io
+        from src.services.email_service import extract_text_from_attachment
+        
+        # Test txt
+        txt_bytes = b"Hello, this is a plain text file."
+        txt_res = extract_text_from_attachment(txt_bytes, "test.txt")
+        assert "plain text file" in txt_res, "TXT extraction failed"
+        
+        # Test docx
+        import docx
+        doc = docx.Document()
+        doc.add_paragraph("Hello, this is a Word document paragraph.")
+        doc_io = io.BytesIO()
+        doc.save(doc_io)
+        doc_bytes = doc_io.getvalue()
+        doc_res = extract_text_from_attachment(doc_bytes, "test.docx")
+        assert "Word document paragraph" in doc_res, "DOCX extraction failed"
+        
+        # Test xlsx
+        import openpyxl
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Sheet1"
+        ws["A1"] = "Excel Data Cell A1"
+        ws["B2"] = "Excel Data Cell B2"
+        wb_io = io.BytesIO()
+        wb.save(wb_io)
+        wb_bytes = wb_io.getvalue()
+        wb_res = extract_text_from_attachment(wb_bytes, "test.xlsx")
+        assert "Excel Data Cell A1" in wb_res and "Excel Data Cell B2" in wb_res, "XLSX extraction failed"
+        
+        # Test zip
+        import zipfile
+        zip_io = io.BytesIO()
+        with zipfile.ZipFile(zip_io, "w") as z:
+            z.writestr("nested.txt", b"Content inside zip txt file")
+        zip_bytes = zip_io.getvalue()
+        zip_res = extract_text_from_attachment(zip_bytes, "test.zip")
+        assert "Content inside zip txt file" in zip_res, "ZIP extraction failed"
+        
+        print("  ✔ Passed: Content extraction functions verified for TXT, DOCX, XLSX, ZIP.")
+
+
         print("\n==================================================")
         print("        ALL VERIFICATIONS PASSED SUCCESSFULLY!    ")
         print("==================================================")
+
 
     finally:
         conn.close()
