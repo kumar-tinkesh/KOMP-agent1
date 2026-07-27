@@ -222,3 +222,157 @@ def download_attachment(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"IMAP Server or Extraction Error: {str(e)}"
         )
+
+
+import json
+
+INVOICE_EXTRACTION_PROMPT = """
+You are an expert invoice and timesheet data parser.
+Analyze the provided document text context and extract all billing/timesheet information.
+
+Generate a JSON response containing the following structure:
+{
+  "invoice_number": null or string,
+  "invoice_date": null or string,
+  "billing_period": null or string,
+  "client_name": null or string,
+  "contractors": [
+    {
+      "name": null or string,
+      "position": null or string,
+      "hourly_rate": null or string,
+      "total_hours": null or string,
+      "amount_due": null or string,
+      "payable_to": null or string,
+      "tasks": [
+        {
+          "task_name": string,
+          "date": string,
+          "duration": string
+        }
+      ]
+    }
+  ],
+  "total_amount_due": null or string,
+  "additional_metadata": {
+     // Put any other key-value pairs found in the document that do not fit the fixed schema above
+  },
+  "additional_notes": null or string
+}
+
+Return ONLY the raw JSON object. Do not wrap the JSON in markdown code blocks like ```json ... ```.
+"""
+
+def parse_llm_json(response_text: str) -> dict:
+    cleaned = response_text.strip()
+    if cleaned.startswith("```json"):
+        cleaned = cleaned[7:]
+    if cleaned.endswith("```"):
+        cleaned = cleaned[:-3]
+    cleaned = cleaned.strip()
+    try:
+        return json.loads(cleaned)
+    except Exception as e:
+        logger.warning(f"Failed to parse LLM structured response as JSON: {e}. Raw text: {response_text}")
+        return {"raw_text": response_text, "parsing_error": str(e)}
+
+
+@router.get("/emails/{msg_id}/attachments/analyze")
+def analyze_attachments(
+    msg_id: str,
+    db: sqlite3.Connection = Depends(get_db),
+    current_user: dict = Depends(require_client)
+):
+    """
+    Fetch all attachments for the given email in RAM, run them through the Gemini structured extraction client,
+    and return parsed key-value invoice/timesheet fields (supporting multi-person structures and dynamic metadata).
+    """
+    logger.info(f"Client '{current_user['username']}' requested LLM extraction analysis for email ID: {msg_id}")
+    
+    # 1. Fetch client profile
+    client = get_client_by_user_id(db, current_user["user_id"])
+    if not client:
+        logger.error(f"Client profile not found in database for user ID: {current_user['user_id']}")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Client profile not found in database."
+        )
+
+    # 2. Decrypt client's IMAP password
+    try:
+        decrypted_password = decrypt_password(client["app_password"])
+    except Exception as e:
+        logger.error(f"Failed to decrypt credentials for client email '{client['email']}': {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to decrypt credentials. Super Admin must reset configuration. ({str(e)})"
+        )
+
+    # 3. Retrieve attachments in RAM
+    try:
+        attachments = email_service.get_email_attachments_in_memory(
+            host=client["imap_host"],
+            username=client["email"],
+            password=decrypted_password,
+            msg_id=msg_id,
+            mailbox=client["mailbox"]
+        )
+    except Exception as e:
+        logger.error(f"Failed to retrieve attachments for email ID '{msg_id}' via IMAP: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"IMAP Server or Extraction Error: {str(e)}"
+        )
+
+    if not attachments:
+        return {
+            "email_id": msg_id,
+            "message": "No attachments found to analyze.",
+            "analyzed_count": 0,
+            "results": []
+        }
+
+    # 4. Initialize GeminiClient
+    # pyrefly: ignore [missing-import]
+    from llm.geminiClient import GeminiClient
+    llm = GeminiClient()
+
+    # 5. Run extraction on each attachment
+    results = []
+    for item in attachments:
+        filename = item["filename"]
+        text_content = item["text_content"]
+
+        if not text_content or "[Error" in text_content:
+            results.append({
+                "filename": filename,
+                "status": "Skipped (no content or error)",
+                "extracted_data": None
+            })
+            continue
+
+        try:
+            # Call generate_structured with our specialized invoice parser prompt
+            raw_response = llm.generate_structured(
+                context=text_content,
+                prompt=INVOICE_EXTRACTION_PROMPT
+            )
+            extracted_json = parse_llm_json(raw_response)
+            results.append({
+                "filename": filename,
+                "status": "Success",
+                "extracted_data": extracted_json
+            })
+        except Exception as e:
+            logger.error(f"Error running LLM structuring for attachment '{filename}': {e}")
+            results.append({
+                "filename": filename,
+                "status": f"Error: {str(e)}",
+                "extracted_data": None
+            })
+
+    return {
+        "email_id": msg_id,
+        "analyzed_count": len(results),
+        "results": results
+    }
