@@ -35,17 +35,7 @@ except ImportError:
 def list_latest_emails(host, username, password, mailbox="INBOX", limit=5, status_filter="ALL"):
     """
     Connects to an IMAP server and retrieves the latest emails.
-
-    Args:
-        host: IMAP server address
-        username: Email address
-        password: App password (plaintext decrypted)
-        mailbox: Mailbox name
-        limit: Number of emails to fetch
-        status_filter: Filter type ('ALL', 'UNSEEN', 'SEEN')
-
-    Returns:
-        List[dict]: Details of retrieved emails.
+    Optimized for high performance by fetching metadata first, and filtering social/promo emails.
     """
     if status_filter not in ("ALL", "UNSEEN", "SEEN"):
         status_filter = "ALL"
@@ -80,104 +70,174 @@ def list_latest_emails(host, username, password, mailbox="INBOX", limit=5, statu
         if not email_ids:
             return []
 
-        # Get latest email ids
-        email_ids = email_ids[-limit:]
+        # Get a larger window of email IDs to account for filtered messages
+        fetch_limit = max(limit * 3, limit + 10)
+        email_ids = email_ids[-fetch_limit:]
         email_ids.reverse()  # Newest emails first
 
         email_list = []
+        is_gmail = "gmail.com" in host.lower()
+        metadata_query = "(FLAGS RFC822.SIZE X-GM-LABELS)" if is_gmail else "(FLAGS RFC822.SIZE)"
 
         for msg_id in email_ids:
-            try:
-                # Fetch flags to check read/unread status reliably
-                status, flag_data = mail.fetch(msg_id, "(FLAGS)")
-                is_read = False
-                if status == "OK" and flag_data and flag_data[0]:
-                    is_read = b'\\Seen' in flag_data[0]
+            if len(email_list) >= limit:
+                break
 
-                # Fetch message body
-                status, msg_data = mail.fetch(msg_id, "(RFC822)")
-                if status != "OK" or not msg_data or not msg_data[0]:
+            try:
+                # 1. Fetch metadata first (extremely fast check)
+                status, metadata_resp = mail.fetch(msg_id, metadata_query)
+                if status != "OK" or not metadata_resp or not metadata_resp[0]:
                     continue
 
-                msg = email.message_from_bytes(msg_data[0][1])
+                first_item = metadata_resp[0]
+                if isinstance(first_item, tuple):
+                    first_item = first_item[0]
 
-                subject_header = msg.get("Subject", "")
-                subject_decoded = decode_header(subject_header)[0]
-                subject = subject_decoded[0]
+                metadata_str = first_item.decode('utf-8', errors='ignore') if isinstance(first_item, bytes) else str(first_item)
+                
+                # Check seen flag
+                is_read = b'\\Seen' in first_item if isinstance(first_item, bytes) else '\\Seen' in str(first_item)
 
-                if isinstance(subject, bytes):
-                    subject = subject.decode(
-                        subject_decoded[1] or "utf-8",
-                        errors="ignore"
-                    )
+                # Check Gmail category labels (fast check)
+                if is_social_or_promotional_email(metadata_str, "", "", None, is_gmail):
+                    continue
+
+                # Parse email size in bytes
+                size_match = re.search(r'RFC822\.SIZE\s+(\d+)', metadata_str, re.IGNORECASE)
+                email_size = int(size_match.group(1)) if size_match else 0
 
                 attachments = []
-                html_body = ""
-                text_body = ""
-                for part in msg.walk():
-                    content_type = part.get_content_type()
-                    if content_type == "text/plain":
-                        try:
-                            payload = part.get_payload(decode=True)
-                            if payload:
-                                text_body += payload.decode('utf-8', errors='ignore')
-                        except Exception:
-                            pass
-                    elif content_type == "text/html":
-                        try:
-                            payload = part.get_payload(decode=True)
-                            if payload:
-                                html_body += payload.decode('utf-8', errors='ignore')
-                        except Exception:
-                            pass
+                subject = ""
+                from_val = ""
+                to_val = ""
+                date_val = ""
+                msg_obj = None
 
-                    filename = part.get_filename()
-                    if filename:
-                        decoded_filename_parts = decode_header(filename)
-                        decoded_filename = ""
-                        for decoded_text, encoding in decoded_filename_parts:
+                # 2. Decide fetch strategy based on email size (avoid downloading large attachments during listing)
+                if email_size > 0 and email_size < 150000:
+                    # Small email: Fetch full RFC822 body for complete parsing (including Drive links)
+                    status, msg_data = mail.fetch(msg_id, "(RFC822)")
+                    if status != "OK" or not msg_data or not msg_data[0]:
+                        continue
+                    
+                    msg_obj = email.message_from_bytes(msg_data[0][1])
+                    
+                    subject_header = msg_obj.get("Subject", "")
+                    subject_decoded = decode_header(subject_header)[0]
+                    subject = subject_decoded[0]
+                    if isinstance(subject, bytes):
+                        subject = subject.decode(subject_decoded[1] or "utf-8", errors="ignore")
+                    
+                    from_val = msg_obj.get("From")
+                    to_val = msg_obj.get("To")
+                    date_val = msg_obj.get("Date")
+
+                    html_body = ""
+                    text_body = ""
+                    for part in msg_obj.walk():
+                        content_type = part.get_content_type()
+                        if content_type == "text/plain":
+                            try:
+                                payload = part.get_payload(decode=True)
+                                if payload:
+                                    text_body += payload.decode('utf-8', errors='ignore')
+                            except:
+                                pass
+                        elif content_type == "text/html":
+                            try:
+                                payload = part.get_payload(decode=True)
+                                if payload:
+                                    html_body += payload.decode('utf-8', errors='ignore')
+                            except:
+                                pass
+
+                        filename = part.get_filename()
+                        if filename:
+                            decoded_filename_parts = decode_header(filename)
+                            decoded_filename = ""
+                            for decoded_text, encoding in decoded_filename_parts:
+                                if isinstance(decoded_text, bytes):
+                                    try:
+                                        decoded_filename += decoded_text.decode(encoding or "utf-8", errors="ignore")
+                                    except:
+                                        decoded_filename += decoded_text.decode("utf-8", errors="ignore")
+                                else:
+                                    decoded_filename += decoded_text
+                            if decoded_filename not in attachments:
+                                attachments.append(decoded_filename)
+                        elif part.get_content_disposition() == 'attachment':
+                            attachments.append("unnamed_attachment")
+
+                    # Parse Google Drive attachments in HTML body
+                    if html_body:
+                        drive_pattern = r'href="https://drive\.google\.com/file/d/[^"]+"[^>]*aria-label="([^"]+)"'
+                        drive_matches = re.findall(drive_pattern, html_body)
+                        if not drive_matches:
+                            span_pattern = r'class="[^"]*gmail_drive_chip[^"]*".*?<span dir="ltr"[^>]*>([^<]+)</span>'
+                            drive_matches = re.findall(span_pattern, html_body, re.DOTALL)
+                        for match in drive_matches:
+                            name = match.strip()
+                            if name and name not in attachments:
+                                attachments.append(name)
+
+                    # Parse Google Drive attachments in Plain Text body
+                    if text_body:
+                        lines = [line.strip() for line in text_body.splitlines() if line.strip()]
+                        for idx, line in enumerate(lines):
+                            if "drive.google.com/file/d/" in line:
+                                filename = "Google Drive File"
+                                if idx > 0 and lines[idx - 1] and not ("drive.google.com" in lines[idx - 1] or "http" in lines[idx - 1]):
+                                    filename = lines[idx - 1].strip("<>()[]\"' ")
+                                if filename and filename not in attachments:
+                                    attachments.append(filename)
+                
+                else:
+                    # Large email: Fetch only HEADERS and BODYSTRUCTURE to keep it extremely fast
+                    status, msg_data = mail.fetch(msg_id, "(BODYSTRUCTURE BODY[HEADER.FIELDS (FROM TO SUBJECT DATE)])")
+                    if status != "OK" or not msg_data or not msg_data[0]:
+                        continue
+                    
+                    meta_str = msg_data[0][0].decode('utf-8', errors='ignore') if isinstance(msg_data[0][0], bytes) else str(msg_data[0][0])
+                    raw_headers = msg_data[0][1]
+                    
+                    msg_obj = email.message_from_bytes(raw_headers)
+                    subject_header = msg_obj.get("Subject", "")
+                    subject_decoded = decode_header(subject_header)[0]
+                    subject = subject_decoded[0]
+                    if isinstance(subject, bytes):
+                        subject = subject.decode(subject_decoded[1] or "utf-8", errors="ignore")
+                        
+                    from_val = msg_obj.get("From")
+                    to_val = msg_obj.get("To")
+                    date_val = msg_obj.get("Date")
+                    
+                    # Extract standard attachment filenames from BODYSTRUCTURE response
+                    found_filenames = re.findall(r'"filename"\s+"([^"]+)"', meta_str, re.IGNORECASE)
+                    for fname in found_filenames:
+                        decoded_parts = decode_header(fname)
+                        decoded_fname = ""
+                        for decoded_text, encoding in decoded_parts:
                             if isinstance(decoded_text, bytes):
                                 try:
-                                    decoded_filename += decoded_text.decode(encoding or "utf-8", errors="ignore")
-                                except Exception:
-                                    decoded_filename += decoded_text.decode("utf-8", errors="ignore")
+                                    decoded_fname += decoded_text.decode(encoding or "utf-8", errors="ignore")
+                                except:
+                                    decoded_fname += decoded_text.decode("utf-8", errors="ignore")
                             else:
-                                decoded_filename += decoded_text
-                        if decoded_filename not in attachments:
-                            attachments.append(decoded_filename)
-                    elif part.get_content_disposition() == 'attachment':
-                        attachments.append("unnamed_attachment")
+                                decoded_fname += decoded_text
+                        if decoded_fname and decoded_fname not in attachments:
+                            attachments.append(decoded_fname)
 
-                # Parse Google Drive attachments in HTML body
-                if html_body:
-                    drive_pattern = r'href="https://drive\.google\.com/file/d/[^"]+"[^>]*aria-label="([^"]+)"'
-                    drive_matches = re.findall(drive_pattern, html_body)
-                    if not drive_matches:
-                        span_pattern = r'class="[^"]*gmail_drive_chip[^"]*".*?<span dir="ltr"[^>]*>([^<]+)</span>'
-                        drive_matches = re.findall(span_pattern, html_body, re.DOTALL)
-                    for match in drive_matches:
-                        name = match.strip()
-                        if name and name not in attachments:
-                            attachments.append(name)
-
-                # Parse Google Drive attachments in Plain Text body
-                if text_body:
-                    lines = [line.strip() for line in text_body.splitlines() if line.strip()]
-                    for idx, line in enumerate(lines):
-                        if "drive.google.com/file/d/" in line:
-                            filename = "Google Drive File"
-                            if idx > 0 and lines[idx - 1] and not ("drive.google.com" in lines[idx - 1] or "http" in lines[idx - 1]):
-                                filename = lines[idx - 1].strip("<>()[]\"' ")
-                            if filename and filename not in attachments:
-                                attachments.append(filename)
+                # 3. Apply header-based social and promotional filtering
+                if is_social_or_promotional_email("", from_val, subject, msg_obj, is_gmail):
+                    continue  # Skip social and promotional messages!
 
                 email_list.append(
                     {
                         "id": msg_id.decode("utf-8", errors="ignore"),
                         "subject": subject,
-                        "from": msg.get("From"),
-                        "to": msg.get("To"),
-                        "date": msg.get("Date"),
+                        "from": from_val,
+                        "to": to_val,
+                        "date": date_val,
                         "status": "Read" if is_read else "Unread",
                         "has_attachment": len(attachments) > 0,
                         "attachment_count": len(attachments),
@@ -185,7 +245,6 @@ def list_latest_emails(host, username, password, mailbox="INBOX", limit=5, statu
                     }
                 )
             except Exception:
-                # Continue fetching other emails even if one fails
                 continue
 
         return email_list
@@ -206,5 +265,6 @@ from src.services.email_service_utils import (
     download_email_attachments,
     extract_drive_links,
     download_file_from_google_drive,
+    is_social_or_promotional_email,
 )
 

@@ -1,8 +1,10 @@
 import os
 import imaplib
 import email
+import re
 from email.header import decode_header
 from dotenv import load_dotenv
+from src.services.email_service_utils import is_social_or_promotional_email
 
 
 load_dotenv()
@@ -11,17 +13,7 @@ load_dotenv()
 def list_latest_emails(host, username, password, mailbox="INBOX", limit=5, status_filter="ALL"):
     """
     Connect to an IMAP server and list latest emails.
-
-    Args:
-        host: IMAP server address
-        username: Email address
-        password: App password
-        mailbox: Mailbox name
-        limit: Number of emails to fetch
-        status_filter: Filter type ('ALL', 'UNSEEN', 'SEEN')
-
-    Returns:
-        List[dict]: Email details
+    Optimized for high performance by fetching metadata first, and filtering social/promo emails.
     """
     if status_filter not in ("ALL", "UNSEEN", "SEEN"):
         status_filter = "ALL"
@@ -39,43 +31,104 @@ def list_latest_emails(host, username, password, mailbox="INBOX", limit=5, statu
         if status != "OK":
             raise Exception("Failed to search mailbox.")
 
-        # Get latest emails only
         email_ids = messages[0].split()
-        email_ids = email_ids[-limit:]
-        email_ids.reverse()  # newest first
+        if not email_ids:
+            return []
+
+        # Get a larger window of email IDs to account for filtered messages
+        fetch_limit = max(limit * 3, limit + 10)
+        email_ids = email_ids[-fetch_limit:]
+        email_ids.reverse()  # Newest emails first
 
         email_list = []
+        is_gmail = "gmail.com" in host.lower()
+        metadata_query = "(FLAGS RFC822.SIZE X-GM-LABELS)" if is_gmail else "(FLAGS RFC822.SIZE)"
 
         for msg_id in email_ids:
-            status, msg_data = mail.fetch(msg_id, "(FLAGS RFC822)")
+            if len(email_list) >= limit:
+                break
 
-            if status != "OK" or not msg_data or not msg_data[0]:
-                continue
+            try:
+                # 1. Fetch metadata first (extremely fast check)
+                status, metadata_resp = mail.fetch(msg_id, metadata_query)
+                if status != "OK" or not metadata_resp or not metadata_resp[0]:
+                    continue
 
-            flags_metadata = msg_data[0][0]
-            is_read = b'\\Seen' in flags_metadata
+                first_item = metadata_resp[0]
+                if isinstance(first_item, tuple):
+                    first_item = first_item[0]
 
-            msg = email.message_from_bytes(msg_data[0][1])
+                metadata_str = first_item.decode('utf-8', errors='ignore') if isinstance(first_item, bytes) else str(first_item)
+                
+                # Check seen flag
+                is_read = b'\\Seen' in first_item if isinstance(first_item, bytes) else '\\Seen' in str(first_item)
 
-            subject_data = decode_header(msg.get("Subject", ""))[0]
-            subject = subject_data[0]
+                # Check Gmail category labels (fast check)
+                if is_social_or_promotional_email(metadata_str, "", "", None, is_gmail):
+                    continue
 
-            if isinstance(subject, bytes):
-                subject = subject.decode(
-                    subject_data[1] or "utf-8",
-                    errors="ignore"
+                # Parse email size in bytes
+                size_match = re.search(r'RFC822\.SIZE\s+(\d+)', metadata_str, re.IGNORECASE)
+                email_size = int(size_match.group(1)) if size_match else 0
+
+                subject = ""
+                from_val = ""
+                to_val = ""
+                date_val = ""
+                msg_obj = None
+
+                # 2. Decide fetch strategy based on email size
+                if email_size > 0 and email_size < 150000:
+                    status, msg_data = mail.fetch(msg_id, "(RFC822)")
+                    if status != "OK" or not msg_data or not msg_data[0]:
+                        continue
+                    
+                    msg_obj = email.message_from_bytes(msg_data[0][1])
+                    subject_header = msg_obj.get("Subject", "")
+                    subject_decoded = decode_header(subject_header)[0]
+                    subject = subject_decoded[0]
+                    if isinstance(subject, bytes):
+                        subject = subject.decode(subject_decoded[1] or "utf-8", errors="ignore")
+                    
+                    from_val = msg_obj.get("From")
+                    to_val = msg_obj.get("To")
+                    date_val = msg_obj.get("Date")
+                
+                else:
+                    # Large email: Fetch only headers to keep it fast
+                    status, msg_data = mail.fetch(msg_id, "(BODY[HEADER.FIELDS (FROM TO SUBJECT DATE)])")
+                    if status != "OK" or not msg_data or not msg_data[0]:
+                        continue
+                    
+                    raw_headers = msg_data[0][1]
+                    msg_obj = email.message_from_bytes(raw_headers)
+                    
+                    subject_header = msg_obj.get("Subject", "")
+                    subject_decoded = decode_header(subject_header)[0]
+                    subject = subject_decoded[0]
+                    if isinstance(subject, bytes):
+                        subject = subject.decode(subject_decoded[1] or "utf-8", errors="ignore")
+                        
+                    from_val = msg_obj.get("From")
+                    to_val = msg_obj.get("To")
+                    date_val = msg_obj.get("Date")
+
+                # 3. Apply header-based social and promotional filtering
+                if is_social_or_promotional_email("", from_val, subject, msg_obj, is_gmail):
+                    continue  # Skip social and promotional messages!
+
+                email_list.append(
+                    {
+                        "id": msg_id.decode(),
+                        "subject": subject,
+                        "from": from_val,
+                        "to": to_val,
+                        "date": date_val,
+                        "status": "Read" if is_read else "Unread",
+                    }
                 )
-
-            email_list.append(
-                {
-                    "id": msg_id.decode(),
-                    "subject": subject,
-                    "from": msg.get("From"),
-                    "to": msg.get("To"),
-                    "date": msg.get("Date"),
-                    "status": "Read" if is_read else "Unread",
-                }
-            )
+            except Exception:
+                continue
 
         return email_list
 

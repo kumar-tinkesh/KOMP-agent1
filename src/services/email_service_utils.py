@@ -207,6 +207,42 @@ def extract_drive_links(text_body, html_body):
     return links
 
 
+def is_social_or_promotional_email(metadata_str: str, from_val: str, subject_val: str, msg_obj, is_gmail: bool) -> bool:
+    """
+    Determines if an email is a social notification or promotional bulk email.
+    Checks Gmail system labels first (if Gmail), then falls back to header heuristics.
+    """
+    # 1. Check Gmail-specific category labels in metadata_str
+    if is_gmail and metadata_str:
+        if "\\Social" in metadata_str or "\\Promotions" in metadata_str:
+            return True
+
+    # 2. Check general headers
+    from_header = (from_val or "").lower()
+    subject_lower = (subject_val or "").lower()
+    
+    # Check List-Unsubscribe header
+    has_unsubscribe = False
+    is_bulk = False
+    if msg_obj:
+        has_unsubscribe = "list-unsubscribe" in [h.lower() for h in msg_obj.keys()]
+        precedence = (msg_obj.get("Precedence") or "").lower()
+        is_bulk = precedence in ("bulk", "list", "junk")
+        
+    # Social sender domains
+    social_domains = ["facebookmail.com", "linkedin.com", "twitter.com", "instagram.com", "pinterest.com", "meetup.com", "social"]
+    is_social_domain = any(domain in from_header for domain in social_domains)
+    
+    # Promotional keywords
+    promo_keywords = ["promotion", "coupon", "discount", "deals", "newsletter", "special offer", "sale", "unsubscribe"]
+    is_promo_keyword = any(kw in subject_lower or kw in from_header for kw in promo_keywords)
+    
+    if is_social_domain or (has_unsubscribe and (is_bulk or is_promo_keyword)):
+        return True
+        
+    return False
+
+
 def download_file_from_google_drive(file_id, dest_path):
     """
     Downloads a public file from Google Drive by its file ID.
