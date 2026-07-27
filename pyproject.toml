@@ -11,5 +11,9 @@ dependencies = [
     "python-docx>=1.1.0",
     "openpyxl>=3.1.0",
     "xlrd>=2.0.1",
+    "fastapi>=0.110.0",
+    "uvicorn>=0.28.0",
+    "loguru>=0.7.0",
+    "python-multipart>=0.0.7",
 ]
 
