@@ -243,7 +243,7 @@ def is_social_or_promotional_email(metadata_str: str, from_val: str, subject_val
     return False
 
 
-def download_file_from_google_drive(file_id, dest_path):
+def download_file_from_google_drive(file_id, dest_path=None):
     """
     Downloads a public file from Google Drive by its file ID.
     Handles the virus scan warning page automatically.
@@ -280,11 +280,134 @@ def download_file_from_google_drive(file_id, dest_path):
                 f"  https://drive.google.com/file/d/{file_id}/view"
             )
                     
-        with open(dest_path, "wb") as f:
-            f.write(content)
+        if dest_path:
+            with open(dest_path, "wb") as f:
+                f.write(content)
             
         return content
 
+
+
+def get_email_attachments_in_memory(host, username, password, msg_id, mailbox="INBOX"):
+    """
+    Connects to an IMAP server, fetches a specific email by msg_id,
+    extracts all attachments (both MIME attachments and Google Drive links) directly into RAM,
+    extracts text content, and returns a list of dictionaries with raw bytes and text content.
+    """
+    try:
+        mail = imaplib.IMAP4_SSL(host)
+    except Exception as e:
+        raise IMAPConnectionError(f"Could not establish connection to host '{host}': {e}")
+
+    try:
+        try:
+            mail.login(username, password)
+        except imaplib.IMAP4.error as e:
+            raise IMAPAuthenticationError(
+                f"Failed to authenticate user '{username}' on IMAP server: {e}"
+            )
+
+        try:
+            status, _ = mail.select(mailbox)
+            if status != "OK":
+                raise IMAPMailboxError(f"Unable to open mailbox: '{mailbox}'")
+        except Exception as e:
+            if not isinstance(e, IMAPMailboxError):
+                raise IMAPMailboxError(f"Error selecting mailbox '{mailbox}': {e}")
+            raise e
+
+        # Fetch message by sequence ID / UID
+        status, msg_data = mail.fetch(str(msg_id).encode(), "(RFC822)")
+        if status != "OK" or not msg_data or not msg_data[0]:
+            raise IMAPMailboxError(f"Failed to fetch message ID '{msg_id}' from mailbox.")
+
+        msg = email.message_from_bytes(msg_data[0][1])
+        attachments = []
+        text_body = ""
+        html_body = ""
+
+        for part in msg.walk():
+            content_type = part.get_content_type()
+            if content_type == "text/plain":
+                try:
+                    payload = part.get_payload(decode=True)
+                    if payload:
+                        text_body += payload.decode('utf-8', errors='ignore')
+                except:
+                    pass
+            elif content_type == "text/html":
+                try:
+                    payload = part.get_payload(decode=True)
+                    if payload:
+                        html_body += payload.decode('utf-8', errors='ignore')
+                except:
+                    pass
+
+            filename = part.get_filename()
+            content_disposition = part.get_content_disposition()
+            
+            # If it's a MIME attachment
+            if filename or content_disposition == 'attachment':
+                if not filename:
+                    filename = "unnamed_attachment"
+                
+                # Decode filename
+                decoded_filename_parts = decode_header(filename)
+                decoded_filename = ""
+                for decoded_text, encoding in decoded_filename_parts:
+                    if isinstance(decoded_text, bytes):
+                        try:
+                            decoded_filename += decoded_text.decode(encoding or "utf-8", errors="ignore")
+                        except Exception:
+                            decoded_filename += decoded_text.decode("utf-8", errors="ignore")
+                    else:
+                        decoded_filename += decoded_text
+
+                payload = part.get_payload(decode=True)
+                if not payload:
+                    continue
+
+                # Extract text content directly from the in-memory payload bytes
+                text_content = extract_text_from_attachment(payload, decoded_filename)
+
+                attachments.append({
+                    "filename": decoded_filename,
+                    "content_bytes": payload,
+                    "text_content": text_content
+                })
+
+        # Process Google Drive attachments as well
+        drive_links = extract_drive_links(text_body, html_body)
+        for item in drive_links:
+            filename = item['filename']
+            file_id = item['file_id']
+
+            try:
+                # Download Google Drive file directly to RAM
+                payload = download_file_from_google_drive(file_id, dest_path=None)
+                
+                # Extract text content from the in-memory payload bytes
+                text_content = extract_text_from_attachment(payload, filename)
+
+                attachments.append({
+                    "filename": filename,
+                    "content_bytes": payload,
+                    "text_content": text_content
+                })
+            except Exception as e:
+                attachments.append({
+                    "filename": filename,
+                    "content_bytes": b"",
+                    "text_content": f"[Error downloading Google Drive link: {e}]"
+                })
+
+        return attachments
+
+    finally:
+        try:
+            mail.logout()
+        except:
+            pass
 
 
 def download_email_attachments(host, username, password, msg_id, download_dir, mailbox="INBOX"):

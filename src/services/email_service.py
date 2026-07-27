@@ -266,5 +266,6 @@ from src.services.email_service_utils import (
     extract_drive_links,
     download_file_from_google_drive,
     is_social_or_promotional_email,
+    get_email_attachments_in_memory,
 )
 
