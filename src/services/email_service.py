@@ -88,12 +88,16 @@ def list_latest_emails(host, username, password, mailbox="INBOX", limit=5, statu
 
         for msg_id in email_ids:
             try:
-                status, msg_data = mail.fetch(msg_id, "(FLAGS RFC822)")
+                # Fetch flags to check read/unread status reliably
+                status, flag_data = mail.fetch(msg_id, "(FLAGS)")
+                is_read = False
+                if status == "OK" and flag_data and flag_data[0]:
+                    is_read = b'\\Seen' in flag_data[0]
+
+                # Fetch message body
+                status, msg_data = mail.fetch(msg_id, "(RFC822)")
                 if status != "OK" or not msg_data or not msg_data[0]:
                     continue
-
-                flags_metadata = msg_data[0][0]
-                is_read = b'\\Seen' in flags_metadata
 
                 msg = email.message_from_bytes(msg_data[0][1])
 
