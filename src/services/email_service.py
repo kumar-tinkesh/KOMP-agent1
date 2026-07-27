@@ -75,53 +75,120 @@ def list_latest_emails(host, username, password, mailbox="INBOX", limit=5, statu
         email_ids = email_ids[-fetch_limit:]
         email_ids.reverse()  # Newest emails first
 
-        email_list = []
         is_gmail = "gmail.com" in host.lower()
         metadata_query = "(FLAGS RFC822.SIZE X-GM-LABELS)" if is_gmail else "(FLAGS RFC822.SIZE)"
 
+        # 1. Fetch metadata in bulk for all potential emails
+        id_sequence = b",".join(email_ids)
+        status, metadata_resp = mail.fetch(id_sequence, metadata_query)
+        if status != "OK" or not metadata_resp:
+            return []
+
+        # Parse bulk metadata responses
+        parsed_metadata = {}
+        for item in metadata_resp:
+            if not isinstance(item, bytes):
+                continue
+            item_str = item.decode('utf-8', errors='ignore')
+            match_id = re.match(r'^(\d+)\s+', item_str)
+            if not match_id:
+                continue
+            seq_id = match_id.group(1)
+            
+            is_read = '\\Seen' in item_str
+            is_social_or_promo = is_social_or_promotional_email(item_str, "", "", None, is_gmail)
+            
+            size_match = re.search(r'RFC822\.SIZE\s+(\d+)', item_str, re.IGNORECASE)
+            email_size = int(size_match.group(1)) if size_match else 0
+            
+            parsed_metadata[seq_id] = {
+                "is_read": is_read,
+                "is_social_or_promo": is_social_or_promo,
+                "email_size": email_size
+            }
+
+        # 2. Filter out category-flagged emails and select up to `limit` active emails
+        active_emails = []
         for msg_id in email_ids:
-            if len(email_list) >= limit:
+            msg_id_str = msg_id.decode('utf-8', errors='ignore')
+            meta = parsed_metadata.get(msg_id_str)
+            if not meta:
+                continue
+            if meta["is_social_or_promo"]:
+                continue
+            
+            active_emails.append({
+                "id_bytes": msg_id,
+                "id_str": msg_id_str,
+                "is_read": meta["is_read"],
+                "email_size": meta["email_size"]
+            })
+            if len(active_emails) >= limit:
                 break
 
+        if not active_emails:
+            return []
+
+        # 3. Split active emails into small and large groups
+        small_emails = [e for e in active_emails if e["email_size"] > 0 and e["email_size"] < 150000]
+        large_emails = [e for e in active_emails if e["email_size"] == 0 or e["email_size"] >= 150000]
+
+        # 4. Bulk fetch small email bodies
+        parsed_small = {}
+        if small_emails:
+            small_ids = b",".join([e["id_bytes"] for e in small_emails])
+            status, small_resp = mail.fetch(small_ids, "(RFC822)")
+            if status == "OK" and small_resp:
+                for item in small_resp:
+                    if isinstance(item, tuple):
+                        meta_str = item[0].decode('utf-8', errors='ignore')
+                        body_bytes = item[1]
+                        match_id = re.match(r'^(\d+)\s+', meta_str)
+                        if match_id:
+                            seq_id = match_id.group(1)
+                            parsed_small[seq_id] = body_bytes
+
+        # 5. Bulk fetch large email headers and bodystructures
+        parsed_large = {}
+        if large_emails:
+            large_ids = b",".join([e["id_bytes"] for e in large_emails])
+            status, large_resp = mail.fetch(large_ids, "(BODYSTRUCTURE BODY[HEADER.FIELDS (FROM TO SUBJECT DATE)])")
+            if status == "OK" and large_resp:
+                for i in range(len(large_resp)):
+                    item = large_resp[i]
+                    if isinstance(item, tuple):
+                        meta_str = item[0].decode('utf-8', errors='ignore')
+                        header_bytes = item[1]
+                        match_id = re.match(r'^(\d+)\s+', meta_str)
+                        if match_id:
+                            seq_id = match_id.group(1)
+                            
+                            # Retrieve the following structure block
+                            structure_str = ""
+                            if i + 1 < len(large_resp) and isinstance(large_resp[i+1], bytes):
+                                structure_str = large_resp[i+1].decode('utf-8', errors='ignore')
+                                
+                            parsed_large[seq_id] = {
+                                "header_bytes": header_bytes,
+                                "structure_str": structure_str
+                            }
+
+        # 6. Construct final email records list
+        email_list = []
+        for item in active_emails:
+            seq_id = item["id_str"]
+            is_read = item["is_read"]
+            msg_obj = None
+            subject = ""
+            from_val = ""
+            to_val = ""
+            date_val = ""
+            attachments = []
+
             try:
-                # 1. Fetch metadata first (extremely fast check)
-                status, metadata_resp = mail.fetch(msg_id, metadata_query)
-                if status != "OK" or not metadata_resp or not metadata_resp[0]:
-                    continue
-
-                first_item = metadata_resp[0]
-                if isinstance(first_item, tuple):
-                    first_item = first_item[0]
-
-                metadata_str = first_item.decode('utf-8', errors='ignore') if isinstance(first_item, bytes) else str(first_item)
-                
-                # Check seen flag
-                is_read = b'\\Seen' in first_item if isinstance(first_item, bytes) else '\\Seen' in str(first_item)
-
-                # Check Gmail category labels (fast check)
-                if is_social_or_promotional_email(metadata_str, "", "", None, is_gmail):
-                    continue
-
-                # Parse email size in bytes
-                size_match = re.search(r'RFC822\.SIZE\s+(\d+)', metadata_str, re.IGNORECASE)
-                email_size = int(size_match.group(1)) if size_match else 0
-
-                attachments = []
-                subject = ""
-                from_val = ""
-                to_val = ""
-                date_val = ""
-                msg_obj = None
-
-                # 2. Decide fetch strategy based on email size (avoid downloading large attachments during listing)
-                if email_size > 0 and email_size < 150000:
-                    # Small email: Fetch full RFC822 body for complete parsing (including Drive links)
-                    status, msg_data = mail.fetch(msg_id, "(RFC822)")
-                    if status != "OK" or not msg_data or not msg_data[0]:
-                        continue
-                    
-                    msg_obj = email.message_from_bytes(msg_data[0][1])
-                    
+                if seq_id in parsed_small:
+                    # Small email processing: Parse full message
+                    msg_obj = email.message_from_bytes(parsed_small[seq_id])
                     subject_header = msg_obj.get("Subject", "")
                     subject_decoded = decode_header(subject_header)[0]
                     subject = subject_decoded[0]
@@ -175,8 +242,8 @@ def list_latest_emails(host, username, password, mailbox="INBOX", limit=5, statu
                         if not drive_matches:
                             span_pattern = r'class="[^"]*gmail_drive_chip[^"]*".*?<span dir="ltr"[^>]*>([^<]+)</span>'
                             drive_matches = re.findall(span_pattern, html_body, re.DOTALL)
-                        for match in drive_matches:
-                            name = match.strip()
+                        for dm in drive_matches:
+                            name = dm.strip()
                             if name and name not in attachments:
                                 attachments.append(name)
 
@@ -185,22 +252,19 @@ def list_latest_emails(host, username, password, mailbox="INBOX", limit=5, statu
                         lines = [line.strip() for line in text_body.splitlines() if line.strip()]
                         for idx, line in enumerate(lines):
                             if "drive.google.com/file/d/" in line:
-                                filename = "Google Drive File"
+                                fname = "Google Drive File"
                                 if idx > 0 and lines[idx - 1] and not ("drive.google.com" in lines[idx - 1] or "http" in lines[idx - 1]):
-                                    filename = lines[idx - 1].strip("<>()[]\"' ")
-                                if filename and filename not in attachments:
-                                    attachments.append(filename)
-                
-                else:
-                    # Large email: Fetch only HEADERS and BODYSTRUCTURE to keep it extremely fast
-                    status, msg_data = mail.fetch(msg_id, "(BODYSTRUCTURE BODY[HEADER.FIELDS (FROM TO SUBJECT DATE)])")
-                    if status != "OK" or not msg_data or not msg_data[0]:
-                        continue
+                                    fname = lines[idx - 1].strip("<>()[]\"' ")
+                                if fname and fname not in attachments:
+                                    attachments.append(fname)
+
+                elif seq_id in parsed_large:
+                    # Large email processing: Parse headers + structures
+                    large_data = parsed_large[seq_id]
+                    header_bytes = large_data["header_bytes"]
+                    structure_str = large_data["structure_str"]
                     
-                    meta_str = msg_data[0][0].decode('utf-8', errors='ignore') if isinstance(msg_data[0][0], bytes) else str(msg_data[0][0])
-                    raw_headers = msg_data[0][1]
-                    
-                    msg_obj = email.message_from_bytes(raw_headers)
+                    msg_obj = email.message_from_bytes(header_bytes)
                     subject_header = msg_obj.get("Subject", "")
                     subject_decoded = decode_header(subject_header)[0]
                     subject = subject_decoded[0]
@@ -210,11 +274,11 @@ def list_latest_emails(host, username, password, mailbox="INBOX", limit=5, statu
                     from_val = msg_obj.get("From")
                     to_val = msg_obj.get("To")
                     date_val = msg_obj.get("Date")
-                    
-                    # Extract standard attachment filenames from BODYSTRUCTURE response
-                    found_filenames = re.findall(r'"filename"\s+"([^"]+)"', meta_str, re.IGNORECASE)
-                    for fname in found_filenames:
-                        decoded_parts = decode_header(fname)
+
+                    # Extract filenames from BODYSTRUCTURE representation
+                    found_filenames = re.findall(r'"filename"\s+"([^"]+)"', structure_str, re.IGNORECASE)
+                    for fn in found_filenames:
+                        decoded_parts = decode_header(fn)
                         decoded_fname = ""
                         for decoded_text, encoding in decoded_parts:
                             if isinstance(decoded_text, bytes):
@@ -227,13 +291,17 @@ def list_latest_emails(host, username, password, mailbox="INBOX", limit=5, statu
                         if decoded_fname and decoded_fname not in attachments:
                             attachments.append(decoded_fname)
 
-                # 3. Apply header-based social and promotional filtering
+                # Skip email if parsing failed
+                if not msg_obj:
+                    continue
+
+                # Secondary filter check using headers
                 if is_social_or_promotional_email("", from_val, subject, msg_obj, is_gmail):
-                    continue  # Skip social and promotional messages!
+                    continue
 
                 email_list.append(
                     {
-                        "id": msg_id.decode("utf-8", errors="ignore"),
+                        "id": seq_id,
                         "subject": subject,
                         "from": from_val,
                         "to": to_val,

@@ -326,6 +326,7 @@ def get_email_attachments_in_memory(host, username, password, msg_id, mailbox="I
         text_body = ""
         html_body = ""
 
+        mime_tasks = []
         for part in msg.walk():
             content_type = part.get_content_type()
             if content_type == "text/plain":
@@ -366,41 +367,46 @@ def get_email_attachments_in_memory(host, username, password, msg_id, mailbox="I
                 payload = part.get_payload(decode=True)
                 if not payload:
                     continue
-
-                # Extract text content directly from the in-memory payload bytes
-                text_content = extract_text_from_attachment(payload, decoded_filename)
-
-                attachments.append({
-                    "filename": decoded_filename,
-                    "content_bytes": payload,
-                    "text_content": text_content
-                })
-
-        # Process Google Drive attachments as well
-        drive_links = extract_drive_links(text_body, html_body)
-        for item in drive_links:
-            filename = item['filename']
-            file_id = item['file_id']
-
-            try:
-                # Download Google Drive file directly to RAM
-                payload = download_file_from_google_drive(file_id, dest_path=None)
                 
-                # Extract text content from the in-memory payload bytes
-                text_content = extract_text_from_attachment(payload, filename)
+                mime_tasks.append((payload, decoded_filename))
 
-                attachments.append({
-                    "filename": filename,
+        # Parallelize downloads and text extraction
+        from concurrent.futures import ThreadPoolExecutor
+
+        def process_mime_attachment(task):
+            payload, filename = task
+            text_content = extract_text_from_attachment(payload, filename)
+            return {
+                "filename": filename,
+                "content_bytes": payload,
+                "text_content": text_content
+            }
+
+        def process_drive_link(item):
+            g_filename = item['filename']
+            file_id = item['file_id']
+            try:
+                payload = download_file_from_google_drive(file_id, dest_path=None)
+                text_content = extract_text_from_attachment(payload, g_filename)
+                return {
+                    "filename": g_filename,
                     "content_bytes": payload,
                     "text_content": text_content
-                })
+                }
             except Exception as e:
-                attachments.append({
-                    "filename": filename,
+                return {
+                    "filename": g_filename,
                     "content_bytes": b"",
                     "text_content": f"[Error downloading Google Drive link: {e}]"
-                })
+                }
 
+        drive_links = extract_drive_links(text_body, html_body)
+
+        with ThreadPoolExecutor() as executor:
+            mime_results = list(executor.map(process_mime_attachment, mime_tasks))
+            drive_results = list(executor.map(process_drive_link, drive_links))
+
+        attachments = mime_results + drive_results
         return attachments
 
     finally:
