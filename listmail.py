@@ -4,6 +4,7 @@ import email
 import re
 from email.header import decode_header
 from dotenv import load_dotenv
+# pyrefly: ignore [missing-import]
 from src.services.email_service_utils import is_social_or_promotional_email
 
 
